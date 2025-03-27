@@ -1,0 +1,5 @@
+tqdm
+llama-cpp-python
+requests
+pyperclip
+questionary
