@@ -1,3 +1,4 @@
+
 import os
 import sys
 import io
@@ -13,10 +14,11 @@ import questionary
 
 # === Configuration Settings ===
 
+# Model configurations
 MODELS = {
     "phi3": {
         "name": "Phi-3-mini-4k-instruct-q4.gguf",
-        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-q4.gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf"
+        "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf"
     },
     "deepseek": {
         "name": "DeepSeek-R1-Distill-Qwen-1.5B-Q6_K.gguf",
@@ -24,14 +26,127 @@ MODELS = {
     }
 }
 
-MODEL_DIRECTORY = "models"
-MAX_SEQUENCE_LENGTH = 4096
-NUM_THREADS = os.cpu_count() or 8  # Use all available CPU cores
-GPU_LAYERS = 20  # Reduce layers for better compatibility
-MAX_TOKENS = 1024  # Reduce to avoid memory overflows
+# Configuration Constants
+MODEL_DIRECTORY = "models"          # Directory where the models are stored
+MAX_SEQUENCE_LENGTH = 4096          # Maximum context length for the AI
+NUM_THREADS = 8                     # Number of CPU threads allocated
+GPU_LAYERS = 35                     # Number of layers offloaded to the GPU for processing
+MAX_TOKENS = 2048                   # Maximum tokens for each AI response
+CUSTOM_PROMPT = False               # Custom prompt for AI initialization (set to False to disable)
+MAX_HISTORY_SIZE = False            # Limit for conversation history (set to False to disable)
+ENABLE_MONITORING = False           # Enable detailed response time and request tracking
+
+# Stealth mode configuration:
+# When True, no extra ASCII art, model headers, or loading animations will be shown.
 STEALTH_MODE = False
 
+# === End of Configuration Settings ===
+
+# The file path for saving config changes is the current source file.
 CONFIG_FILE = os.path.abspath(__file__)
+
+def edit_config():
+    """
+    Interactive configuration editor that remains open until the user selects "Exit and Save".
+    Editable settings: STEALTH_MODE, ENABLE_MONITORING, CUSTOM_PROMPT, MAX_HISTORY_SIZE.
+    This editor reads and writes to the source file (CONFIG_FILE) so that changes persist.
+    """
+    editable_keys = ["STEALTH_MODE", "ENABLE_MONITORING", "CUSTOM_PROMPT", "MAX_HISTORY_SIZE"]
+    
+    print("\n=== Configuration Editor ===\n")
+    
+    while True:
+        # Read current source file lines
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print("Error reading source file:", e)
+            return
+
+        config_values = {}
+        # Look for lines at the top that start with an editable key.
+        for line in lines:
+            for key in editable_keys:
+                if line.strip().startswith(key + " ="):
+                    try:
+                        value = eval(line.split("=")[1].split("#")[0].strip())
+                    except Exception:
+                        value = line.split("=")[1].split("#")[0].strip()
+                    config_values[key] = value
+
+        # Create a list of choices showing current values and an exit option.
+        choices = [f"{key} = {config_values.get(key, 'N/A')}" for key in editable_keys]
+        choices.append("Exit and Save")
+        
+        selection = questionary.select(
+            "Select a setting to edit:",
+            choices=choices
+        ).ask()
+        if not selection:
+            print("No selection made. Exiting configuration editor.")
+            break
+        if selection == "Exit and Save":
+            print("Exiting configuration editor. Changes saved.")
+            break
+
+        # Parse the key from the selection string (format: "KEY = VALUE")
+        key_to_edit = selection.split(" = ")[0]
+        current_value = config_values.get(key_to_edit, None)
+        
+        # For boolean settings, offer a toggle.
+        if isinstance(current_value, bool):
+            new_val_str = questionary.select(
+                f"Set new value for {key_to_edit} (current: {current_value}):",
+                choices=["True", "False"]
+            ).ask()
+            new_value = True if new_val_str == "True" else False
+        else:
+            # For non-boolean values, prompt for a new value.
+            new_value_input = questionary.text(
+                f"Enter new value for {key_to_edit} (current: {current_value}):"
+            ).ask()
+            try:
+                new_value = int(new_value_input)
+            except ValueError:
+                try:
+                    new_value = float(new_value_input)
+                except ValueError:
+                    new_value = f"'{new_value_input}'"
+
+        # Update the corresponding line in the source file.
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith(key_to_edit + " ="):
+                new_line = f"{key_to_edit} = {new_value}\n"
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                f.writelines(new_lines)
+            print(f"{key_to_edit} has been updated to {new_value}.\n")
+        except Exception as e:
+            print("Error writing to source file:", e)
+
+def select_model():
+    """
+    Interactive model selector using arrow keys.
+    Returns the key of the selected model.
+    """
+    choices = []
+    for key, value in MODELS.items():
+        choices.append(f"{key} - {value['name']}")
+    selection = questionary.select(
+        "Select a model to use:",
+        choices=choices
+    ).ask()
+    if selection:
+        # The selection format is "key - model_name"
+        return selection.split(" - ")[0]
+    else:
+        print("No model selected. Exiting.")
+        sys.exit(1)
 
 class Nexus:
     def __init__(self, model_directory: str):
@@ -42,58 +157,58 @@ class Nexus:
         self.current_model = None
         self.model = None
 
+        if CUSTOM_PROMPT:
+            self.history.append(f"<|assistant|>\n{CUSTOM_PROMPT}\n")
+
     def _ensure_model_exists(self, model_key: str):
+        """Checks if the model exists locally; otherwise, downloads it."""
         model_info = MODELS[model_key]
         model_path = os.path.join(self.model_directory, model_info["name"])
         if os.path.exists(model_path):
-            return model_path
+            return
 
         if not STEALTH_MODE:
-            print(f"[Nexus] Downloading model '{model_info['name']}'...")
-
+            print(f"[Nexus] Model '{model_info['name']}' not found locally.")
+            print(f"[Nexus] Downloading the required model...")
         os.makedirs(self.model_directory, exist_ok=True)
 
         try:
             headers = {}
+            current_size = 0
+            if os.path.exists(model_path):
+                current_size = os.path.getsize(model_path)
+                headers['Range'] = f"bytes={current_size}-"
+
             with requests.get(model_info["url"], stream=True, headers=headers) as response:
                 response.raise_for_status()
-                total_size = int(response.headers.get("content-length", 0))
-                with open(model_path, "wb") as model_file, tqdm(total=total_size, unit="B", unit_scale=True, disable=STEALTH_MODE) as progress_bar:
+                total_size = int(response.headers.get("content-length", 0)) + current_size
+                with open(model_path, "ab") as model_file, tqdm(total=total_size, unit="B", unit_scale=True, initial=current_size, disable=STEALTH_MODE) as progress_bar:
                     for chunk in response.iter_content(chunk_size=8192):
                         model_file.write(chunk)
                         progress_bar.update(len(chunk))
 
             if not STEALTH_MODE:
-                print(f"[Nexus] Model downloaded successfully.")
-
-            return model_path
-
+                print(f"[Nexus] Model downloaded to '{model_path}'.")
         except requests.RequestException as e:
-            print(f"[Nexus] Model download failed: {e}")
-            sys.exit(1)
+            raise Exception(f"[Nexus] Model download failed: {e}")
 
     def load_model(self, model_key: str):
-        model_path = self._ensure_model_exists(model_key)
-
-        try:
-            if not STEALTH_MODE:
-                print(f"[Nexus] Loading model from '{model_path}'...")
-
-            self.model = Llama(
-                model_path=model_path,
-                n_ctx=MAX_SEQUENCE_LENGTH,
-                n_threads=NUM_THREADS,
-                n_gpu_layers=GPU_LAYERS,
-                verbose=False
-            )
-            self.current_model = model_key
-            print(f"[Nexus] Model '{MODELS[model_key]['name']}' loaded successfully.")
-
-        except Exception as e:
-            print(f"[Nexus] Error loading model: {e}")
-            sys.exit(1)
+        """Loads the AI model into memory for interaction."""
+        self._ensure_model_exists(model_key)
+        model_path = os.path.join(self.model_directory, MODELS[model_key]["name"])
+        if not STEALTH_MODE:
+            print(f"[Nexus] Loading model from '{model_path}'...")
+        self.model = Llama(
+            model_path=model_path,
+            n_ctx=MAX_SEQUENCE_LENGTH,
+            n_threads=NUM_THREADS,
+            n_gpu_layers=GPU_LAYERS,
+            verbose=False
+        )
+        self.current_model = model_key
 
     def generate_response(self, prompt: str) -> str:
+        """Generates a response to the given prompt using the loaded AI model."""
         if not self.model:
             return "No model loaded. Please select a model first."
 
@@ -103,6 +218,15 @@ class Nexus:
         try:
             sys.stderr = io.StringIO()
             self.history.append(f"<|user|>\n{prompt}\n")
+
+            if MAX_HISTORY_SIZE and len(self.history) > MAX_HISTORY_SIZE * 2:
+                self.history = self.history[-(MAX_HISTORY_SIZE * 2):]
+
+            spinner_thread = None
+            if not STEALTH_MODE:
+                spinner_thread = threading.Thread(target=self._show_loading_animation)
+                spinner_thread.daemon = True  
+                spinner_thread.start()
 
             response = self.model(
                 f"{''.join(self.history)}\n<|assistant|>",
@@ -115,62 +239,166 @@ class Nexus:
             self.total_tokens += len(response_text.split())
             self.history.append(f"<|assistant|>\n{response_text}")
 
+            if spinner_thread:
+                self._stop_spinner(spinner_thread)
+
             end_time = time.time()
             response_time = end_time - start_time
 
-            print(f"\nNexus Response: {response_text}\n")
-            print(f"\nResponse Time: {response_time:.2f} seconds | Total Requests: {self.num_requests}")
+            if STEALTH_MODE:
+                print(response_text)
+            else:
+                print(f"\nNexus Response: {response_text}\n")
+                if ENABLE_MONITORING:
+                    print(f"\n[Monitoring Details]\n  • Response Time: {response_time:.2f} seconds\n  • Total Requests: {self.num_requests}\n  • Total Tokens Processed: {self.total_tokens}")
 
             return response_text
 
         except Exception as e:
             return f"An error occurred: {e}"
 
+        finally:
+            sys.stderr = sys.__stderr__
+
     def reset_conversation(self):
+        """Resets the conversation history and clears the screen."""
         os.system("cls" if os.name == "nt" else "clear")
         self.history = []
-        print("\nConversation history has been reset.")
+        if CUSTOM_PROMPT:
+            self.history.append(f"<|assistant|>\n{CUSTOM_PROMPT}\n")
+        if not STEALTH_MODE:
+            print("\nConversation history has been reset. Feel free to start afresh.")
+            show_ascii(self.current_model)
         return "Conversation reset successfully."
 
+    def show_help(self):
+        """Displays help information."""
+        if STEALTH_MODE:
+            return "Commands: exit, reset, clear, cc, ca, model, config"
+        else:
+            return (
+                "\n[Nexus Help Center]\n\n"
+                "Available commands:\n"
+                "  - exit     : Exit the program\n"
+                "  - reset    : Clear conversation history\n"
+                "  - clear    : Clear the screen\n"
+                "  - cc       : Copy the most recent code snippet\n"
+                "  - ca       : Copy the latest full response\n"
+                "  - model    : Change the AI model\n"
+                "  - config   : Edit and save configuration settings permanently\n"
+                "\nFor more help, contact the developer 0x3ef8.\n"
+            )
+
+    def clear_screen(self):
+        """Clears the terminal screen."""
+        os.system("cls" if os.name == "nt" else "clear")
+
+    def process_command(self, command: str):
+        """Handles special commands."""
+        if command.lower() == "cc":
+            code = self.extract_code(self.history[-1])
+            pyperclip.copy(code)
+            if not STEALTH_MODE:
+                print("The most recent code snippet has been copied to your clipboard.")
+        elif command.lower() == "ca":
+            response = self.history[-1] if self.history else ""
+            pyperclip.copy(response)
+            if not STEALTH_MODE:
+                print("The latest AI response has been copied to your clipboard.")
+        elif command.lower() == "config":
+            edit_config()
+
+    def extract_code(self, response: str) -> str:
+        """Extracts code blocks from the AI's response."""
+        match = re.search(r'```(.*?)```', response, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _show_loading_animation(self):
+        """Displays a spinner during processing."""
+        spinner = ["|", "/", "-", "\\"]
+        self.spinner_running = True
+        while self.spinner_running:
+            try:
+                for s in spinner:
+                    print(f"\rNexus is processing... {s}", end="", flush=True)
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                self.spinner_running = False
+                if not STEALTH_MODE:
+                    print("\rOperation cancelled by user.")
+                break
+
+    def _stop_spinner(self, spinner_thread):
+        """Stops the spinner."""
+        self.spinner_running = False
+        spinner_thread.join()
+
 def show_ascii(model_name=None):
+    """Displays ASCII art (only if stealth mode is off)."""
     if STEALTH_MODE:
         return
     ascii_art = art.text2art("Nexus")
-    print(ascii_art)
+    lines = ascii_art.splitlines()
+    ascii_with_name = "\n".join(lines[:-1]) + f"\n{' ' * (len(lines[-1]) - 20)}Developed by @0x3ef8"
+    print(ascii_with_name)
     if model_name:
         print(f"\nCurrent Model: {MODELS[model_name]['name']}")
     print("\nType 'help' for available commands or 'exit' to quit.\n")
 
-def select_model():
-    choices = [f"{key} - {value['name']}" for key, value in MODELS.items()]
-    selection = questionary.select("Select a model to use:", choices=choices).ask()
-    return selection.split(" - ")[0] if selection else None
-
 def main():
-    assistant = Nexus(MODEL_DIRECTORY)
-    assistant.reset_conversation()
-    show_ascii()
+    try:
+        assistant = Nexus(MODEL_DIRECTORY)
+        assistant.clear_screen()
+        show_ascii()
 
-    selected_model = select_model()
-    if selected_model:
-        assistant.load_model(selected_model)
-    else:
-        print("No model selected. Exiting.")
-        sys.exit(1)
+        if not STEALTH_MODE:
+            print("Please select a model to start.")
+        model_key = select_model()
+        assistant.load_model(model_key)
+        assistant.clear_screen()
+        show_ascii(model_key)
 
-    while True:
-        try:
-            user_input = input("\n[User]: ")
-            if user_input.lower() in ["exit", "quit"]:
-                print("Exiting Nexus. Goodbye!")
-                sys.exit(0)
-            elif user_input.lower() == "reset":
-                assistant.reset_conversation()
-            else:
+        while True:
+            user_input = input("You: ").strip()
+
+            if user_input.lower() == "exit":
+                if not STEALTH_MODE:
+                    print("Thank you for using Nexus. Goodbye!")
+                break
+
+            if user_input.lower() == "reset":
+                print(assistant.reset_conversation())
+                continue
+
+            if user_input.lower() == "help":
+                print(assistant.show_help())
+                continue
+
+            if user_input.lower() == "clear":
+                assistant.clear_screen()
+                continue
+
+            if user_input.lower() in ['cc', 'ca', 'config']:
+                assistant.process_command(user_input.lower())
+                continue
+
+            if user_input.lower() == "model":
+                model_key = select_model()
+                assistant.load_model(model_key)
+                assistant.clear_screen()
+                show_ascii(model_key)
+                continue
+
+            if user_input:
+                print()  
                 assistant.generate_response(user_input)
-        except KeyboardInterrupt:
-            print("\nExiting Nexus. Goodbye!")
-            sys.exit(0)
+
+    except KeyboardInterrupt:
+        if not STEALTH_MODE:
+            print("\nProgram terminated by user.")
+    except Exception as e:
+        if not STEALTH_MODE:
+            print(f"A critical error occurred: {e}")
 
 if __name__ == "__main__":
     main()
